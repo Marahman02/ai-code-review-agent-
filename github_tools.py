@@ -1,11 +1,13 @@
 from github import Github
 from config import GITHUB_TOKEN
 
-_gh = Github(GITHUB_TOKEN)
+
+def _client(token: str = "") -> Github:
+    return Github(token or GITHUB_TOKEN)
 
 
-def get_pr_info(repo_name: str, pr_number: int) -> dict:
-    repo = _gh.get_repo(repo_name)
+def get_pr_info(repo_name: str, pr_number: int, token: str = "") -> dict:
+    repo = _client(token).get_repo(repo_name)
     pr = repo.get_pull(pr_number)
     return {
         "title": pr.title,
@@ -18,23 +20,23 @@ def get_pr_info(repo_name: str, pr_number: int) -> dict:
     }
 
 
-def get_pr_files(repo_name: str, pr_number: int) -> list[dict]:
-    repo = _gh.get_repo(repo_name)
+def get_pr_files(repo_name: str, pr_number: int, token: str = "") -> list[dict]:
+    repo = _client(token).get_repo(repo_name)
     pr = repo.get_pull(pr_number)
     files = []
     for f in pr.get_files():
         files.append({
             "filename": f.filename,
-            "status": f.status,       # added, modified, removed
+            "status": f.status,
             "additions": f.additions,
             "deletions": f.deletions,
-            "patch": f.patch or "",   # the actual diff
+            "patch": f.patch or "",
         })
     return files
 
 
-def get_open_prs(repo_name: str) -> list[dict]:
-    repo = _gh.get_repo(repo_name)
+def get_open_prs(repo_name: str, token: str = "") -> list[dict]:
+    repo = _client(token).get_repo(repo_name)
     prs = []
     for pr in repo.get_pulls(state="open"):
         prs.append({
@@ -52,25 +54,16 @@ def post_pr_review(
     body: str,
     inline_comments: list[dict],
     event: str = "COMMENT",
+    token: str = "",
 ) -> str:
-    """
-    Post a full review with optional inline comments.
-    event: COMMENT | REQUEST_CHANGES | APPROVE
-    inline_comments: list of {"path": str, "line": int, "body": str}
-    """
-    repo = _gh.get_repo(repo_name)
+    repo = _client(token).get_repo(repo_name)
     pr = repo.get_pull(pr_number)
+    commit = list(pr.get_commits())[-1]
 
-    # Build review comments in GitHub format
-    review_comments = []
-    commit = list(pr.get_commits())[-1]  # latest commit
-
-    for c in inline_comments:
-        review_comments.append({
-            "path": c["path"],
-            "line": c["line"],
-            "body": c["body"],
-        })
+    review_comments = [
+        {"path": c["path"], "line": c["line"], "body": c["body"]}
+        for c in inline_comments
+    ]
 
     pr.create_review(
         commit=commit,

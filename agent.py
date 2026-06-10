@@ -21,16 +21,15 @@ class ReviewState(TypedDict):
     verdict: str
     post_to_github: bool
     result: str
-
-
-llm = ChatAnthropic(model=MODEL, max_tokens=4096)
+    # credentials passed through state so nodes are pure functions
+    anthropic_api_key: str
+    github_token: str
 
 
 def fetch_pr_node(state: ReviewState) -> dict:
     print(f"\n[1/4] Fetching PR #{state['pr_number']} from {state['repo_name']}...")
-    pr_info = get_pr_info(state["repo_name"], state["pr_number"])
-    files = get_pr_files(state["repo_name"], state["pr_number"])
-    # Skip binary files and files with no diff
+    pr_info = get_pr_info(state["repo_name"], state["pr_number"], state["github_token"])
+    files = get_pr_files(state["repo_name"], state["pr_number"], state["github_token"])
     files = [f for f in files if f["patch"] and f["status"] != "removed"]
     print(f"      Found {len(files)} reviewable file(s): {[f['filename'] for f in files]}")
     return {"pr_info": pr_info, "files": files}
@@ -38,6 +37,11 @@ def fetch_pr_node(state: ReviewState) -> dict:
 
 def analyze_files_node(state: ReviewState) -> dict:
     print(f"\n[2/4] Analyzing {len(state['files'])} file(s) with Claude...")
+    llm = ChatAnthropic(
+        model=MODEL,
+        max_tokens=4096,
+        anthropic_api_key=state["anthropic_api_key"],
+    )
     file_reviews = []
 
     for i, file in enumerate(state["files"], 1):
@@ -47,7 +51,7 @@ def analyze_files_node(state: ReviewState) -> dict:
             pr_body=state["pr_info"]["body"][:500],
             filename=file["filename"],
             status=file["status"],
-            patch=file["patch"][:6000],  # cap to avoid token overflow
+            patch=file["patch"][:6000],
         )
         response = llm.invoke([
             SystemMessage(content=SYSTEM_PROMPT),
@@ -56,7 +60,6 @@ def analyze_files_node(state: ReviewState) -> dict:
         try:
             review = json.loads(response.content)
         except json.JSONDecodeError:
-            # Fallback if model returns non-JSON
             review = {
                 "filename": file["filename"],
                 "summary": "Could not parse structured review.",
@@ -70,6 +73,11 @@ def analyze_files_node(state: ReviewState) -> dict:
 
 def generate_final_review_node(state: ReviewState) -> dict:
     print("\n[3/4] Generating final review summary...")
+    llm = ChatAnthropic(
+        model=MODEL,
+        max_tokens=4096,
+        anthropic_api_key=state["anthropic_api_key"],
+    )
 
     file_summaries = ""
     for r in state["file_reviews"]:
@@ -110,8 +118,6 @@ def post_review_node(state: ReviewState) -> dict:
         return {"result": "dry_run"}
 
     print(f"\n[4/4] Posting review to GitHub PR #{state['pr_number']}...")
-
-    # Collect inline comments from file reviews
     inline_comments = []
     for review in state["file_reviews"]:
         for issue in review.get("issues", []):
@@ -127,6 +133,7 @@ def post_review_node(state: ReviewState) -> dict:
         body=state["final_review"],
         inline_comments=inline_comments,
         event=state["verdict"],
+        token=state["github_token"],
     )
     return {"result": result}
 
@@ -148,9 +155,16 @@ def build_graph() -> StateGraph:
     return graph.compile()
 
 
-def run_review(repo_name: str, pr_number: int, post_to_github: bool = False) -> dict:
+def run_review(
+    repo_name: str,
+    pr_number: int,
+    post_to_github: bool = False,
+    anthropic_api_key: str = "",
+    github_token: str = "",
+) -> dict:
+    from config import ANTHROPIC_API_KEY, GITHUB_TOKEN
     app = build_graph()
-    initial_state = {
+    final_state = app.invoke({
         "repo_name": repo_name,
         "pr_number": pr_number,
         "pr_info": {},
@@ -160,6 +174,7 @@ def run_review(repo_name: str, pr_number: int, post_to_github: bool = False) -> 
         "verdict": "",
         "post_to_github": post_to_github,
         "result": "",
-    }
-    final_state = app.invoke(initial_state)
+        "anthropic_api_key": anthropic_api_key or ANTHROPIC_API_KEY,
+        "github_token": github_token or GITHUB_TOKEN,
+    })
     return final_state
